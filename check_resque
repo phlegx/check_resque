@@ -1,0 +1,143 @@
+#!/bin/bash
+# Author: Martin Kammerlander, Phlegx Systems
+# Email:  martin.kammerlander@phlegx.com
+# Version: 0.1, 2011-05-14
+# good example for bash nagios plugin: http://svn.coolcold.org/websvn/filedetails.php?repname=common&path=%2Fmonitoring%2Fnagios%2Fplugins%2Fmy%2Fcheck_tcp_sockets.sh
+# Nagios Plugin API: http://nagios.sourceforge.net/docs/3_0/pluginapi.html
+
+# TODO:
+# 'ps' is not realiable. We need to check if resque daemons do offer PID mechanism
+# Bring performance data into correct form
+# Add cpu/memory warning and critcal options
+# Add showing version number of resque
+# Does ps really show the correct values for cpu/memory usage?
+
+PROGNAME=`basename $0`
+
+
+print_usage() {
+        echo "Usage: $PROGNAME -n <Worker name> -a <number of workers> [-d]"
+        echo "Options:"
+        echo "-n - Worker/Queue [n]ame [COUNT=5 QUEUE=mailer rake resque:workers]  "
+        echo "-a - Number/[a]mount of workers [COUNT=5 QUEUE=mailer rake resque:workers]"
+        echo "-d - Show performance [d]ata"
+}
+
+print_help() {
+        echo $PROGNAME
+        echo ""
+        print_usage
+        echo ""
+        echo "Detects if your resque workers are up and running. Shows CPU and Memory usage for every single worker-"
+	echo "Returns perf data (cumulated CPU and Memory data of all workers) iff -d option activated."
+        echo ""
+        exit $UNKNOWN
+}
+
+### Parse Arguments
+
+while getopts ":hV:n:a:d" Option; do
+        case $Option in
+                h)
+                        print_help
+                        exit 0
+                        ;;
+                V)
+                        print_revision $PROGNAME
+                        exit 0
+                        ;;
+                n)
+                        worker_name=${OPTARG}
+                        ;;
+
+                a)
+                        number_of_workers=${OPTARG}
+                        ;;
+
+                d)
+                        show_perfdata="yes"
+                        ;;
+                                                                                        
+                *)
+                        print_help
+                        exit 0
+                        ;;
+        esac
+done
+shift $(($OPTIND - 1))
+
+
+
+function get_worker_values ()
+{
+for worker in "${arr[@]}"; do
+	if [ "$worker" != "" ]; then
+        	workers+="Worker $2 PID: " 
+                workers+=`echo $worker | awk '{print $2}'`
+                workers+=" - CPU: "
+                workers+=`echo $worker | awk '{print $3}'`
+		cpu=`echo $worker | awk '{print $3}'`
+                workers+="% - Memory: "
+                workers+=`echo $worker | awk '{print $4}'`
+		memory=`echo $worker | awk '{print $4}'`
+                workers+="%\n"
+		# suggested by e36freak in channel #awk, not working yet
+		# read -r cpu mem < <(awk '{cpu_total += $3; mem_total += $4} END {print cpu, mem}' <<<"$output")
+		cpu_total=`echo $cpu $cpu_total| awk '{printf "%f", $1 + $2}'`
+		memory_total=`echo $memory $memory_total| awk '{printf "%f", $1 + $2}'`
+        fi
+done
+	# performance data is not yet in the correct form
+	if [[ ("x$show_perfdata" == "xyes") ]]
+    	then
+       		workers+="|'cpu'=${cpu_total};;;0; 'memory'=${memory_total};;;0;"
+    	fi
+	echo -e $workers
+	exit $exitcode
+}
+
+
+if [[ "x$worker_name" == "x" ]]; then
+	processes=`ps aux | grep -w resque | grep -w Waiting | grep -v grep` 
+else
+	processes=`ps aux | grep -w resque | grep -w Waiting | grep "$worker_name" | grep -v grep`
+fi
+
+if [[ "x$number_of_workers" != "x" ]]; then
+	if [ ! $(echo "$number_of_workers" | grep -E "^[0-9]+$") ]; then
+		echo "CRITICAL - $number_of_workers is not a valid integer."
+		exit 2
+	fi
+
+	if ! [ $number_of_workers -ge 1 ]; then
+		echo "CRITICAL - $number_of_workers is an invalid value. Range is [>0]"
+		exit 2
+	fi
+fi
+
+if [ `echo ${#processes}` == 0 ]; then
+	echo -e "CRITICAL - Worker(s) $worker_name not running."
+	exit 2
+else
+	i=0
+	while read -r li; do 
+		arr+=("$li"); 
+		i=$(expr $i + 1)
+	done <<< "${processes//$1/$'\n'}"; 
+	
+	# decrease value for 1
+	#i=$(expr $i - 1)
+	if [[ "x$number_of_workers" != "x" ]]; then
+		if [ "$i" != "$number_of_workers" ]; then
+			workers="WARNING - Worker(s) $worker_name $i out of $number_of_workers running\n"
+			exitcode=1
+			get_worker_values workers "$worker_name" arr exitcode
+		fi
+	fi
+
+	workers="OK - $i $worker_name Worker(s) up and running\n"
+	exitcode=0
+	get_worker_values workers "$worker_name" arr exitcode
+fi
+
+
